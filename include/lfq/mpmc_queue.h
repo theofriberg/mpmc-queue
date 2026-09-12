@@ -8,7 +8,7 @@ namespace lfq {
 namespace detail {
 // Typical x86/ARM cache line size, used to keep head_/tail_ on separate
 // cache lines and avoid false sharing between producer and consumer threads.
-constexpr std::size_t kCacheLineSize = 64;
+constexpr size_t kCacheLineSize = 64;
 } // namespace detail
 
 // Bounded multi-producer / multi-consumer queue.
@@ -17,14 +17,14 @@ constexpr std::size_t kCacheLineSize = 64;
 // instead of a modulo). This is a skeleton: try_push/try_pop are declared
 // but not yet implemented. See the TODO in the private section for the
 // intended (Vyukov-style) algorithm shape.
-template <typename T, std::size_t Capacity>
+template <typename T, size_t Capacity>
 class MPMCQueue {
     static_assert(Capacity >= 2, "Capacity must be at least 2");
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
 
 public:
     MPMCQueue() {
-        for (std::size_t i = 0; i < Capacity; ++i) {
+        for (size_t i = 0; i < Capacity; ++i) {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
@@ -43,7 +43,7 @@ public:
 
 private:
     struct Cell {
-        std::atomic<std::size_t> sequence;
+        std::atomic<size_t> sequence;
         T data;
     };
 
@@ -77,10 +77,10 @@ private:
     // Work out the memory ordering and the full/empty conditions yourself —
     // that's the point of this exercise.
 
-    alignas(detail::kCacheLineSize) std::atomic<std::size_t> tail_{0};
-    alignas(detail::kCacheLineSize) std::atomic<std::size_t> head_{0};
+    alignas(detail::kCacheLineSize) std::atomic<size_t> tail_{0};
+    alignas(detail::kCacheLineSize) std::atomic<size_t> head_{0};
 
-    static constexpr std::size_t mask_ = Capacity - 1;
+    static constexpr size_t mask_ = Capacity - 1;
     Cell buffer_[Capacity];
 };
 

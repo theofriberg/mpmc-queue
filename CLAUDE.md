@@ -40,6 +40,10 @@ this project's own conventions, chosen to match common systems-C++ practice.
   not part of the public API).
 - One statement per line; braces on the same line as the declaration (K&R /
   Google brace style); 4-space indentation, no tabs.
+- File extensions: `.h` for headers, `.cc` for implementation files (e.g.
+  `include/lfq/mpmc_queue.h`, `src/main.cc`) — this is the Google C++ Style
+  Guide's file-naming convention specifically, adopted here independent of
+  the naming/formatting choices above.
 
 ## Modern C++ idioms (Core Guidelines)
 
@@ -83,7 +87,7 @@ teardown, or test code:
 - **Cache-line awareness.** Pad/align independently-written atomics (e.g.
   producer's `tail_` vs. consumer's `head_`) with `alignas(64)` (or whatever
   `detail::kCacheLineSize` resolves to) to avoid false sharing, as already
-  done in `include/lfq/mpmc_queue.hpp`.
+  done in `include/lfq/mpmc_queue.h`.
 - **Prefer trivially-copyable payload types** (`T`) on the hot path. If a
   non-trivial `T` is required, be explicit about where it's constructed and
   destroyed inside the ring buffer.

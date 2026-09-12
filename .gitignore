@@ -51,3 +51,6 @@ _deps/
 
 # ccache
 .ccache/
+
+# cache
+.cache/
