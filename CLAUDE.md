@@ -26,8 +26,9 @@ this project's own conventions, chosen to match common systems-C++ practice.
 
 ## Naming & formatting
 
-- Types (`class`, `struct`, `enum`, type aliases): `PascalCase`
-  (`MPMCQueue`, `Cell`).
+- Types (`class`, `struct`, `enum`, type aliases): `snake_case`, matching
+  the standard library's own type names (`std::vector`, `std::unique_lock`)
+  (`mpmc_queue`, `cell`, `inplace_array`).
 - Functions and local/parameter variables: `snake_case` (`try_push`,
   `try_pop`).
 - Private/protected member variables: `snake_case_` with a trailing
@@ -67,7 +68,7 @@ teardown, or test code:
 
 - **No heap allocation.** No `new`, no growing `std::vector`, no
   `std::string` construction. Use fixed-size arrays (`std::array` or a raw
-  `T[Capacity]`) sized at compile time, as `MPMCQueue` already does.
+  `T[Capacity]`) sized at compile time, as `mpmc_queue` already does.
 - **No exceptions.** Don't `throw` and don't call anything that can throw;
   mark hot-path functions `noexcept` so the compiler can drop unwind tables
   for them. Signal failure through return values (e.g. `try_push` returning
@@ -86,8 +87,8 @@ teardown, or test code:
   exactly the kind of "why" that's worth a comment.
 - **Cache-line awareness.** Pad/align independently-written atomics (e.g.
   producer's `tail_` vs. consumer's `head_`) with `alignas(64)` (or whatever
-  `detail::kCacheLineSize` resolves to) to avoid false sharing, as already
-  done in `include/lfq/mpmc_queue.h`.
+  the project's cache-line-size constant resolves to) to avoid false
+  sharing, as already done in `include/lfq/mpmc_queue.h`.
 - **Prefer trivially-copyable payload types** (`T`) on the hot path. If a
   non-trivial `T` is required, be explicit about where it's constructed and
   destroyed inside the ring buffer.

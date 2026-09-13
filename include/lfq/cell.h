@@ -1,4 +1,9 @@
+#pragma once
+
 #include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 
 namespace lfq {
 
@@ -28,7 +33,7 @@ template<typename ValueT, typename IndexT>
 using cell_value_t = typename unit_value<sizeof(detail::helper_cell<ValueT, IndexT>)>::type;
 
 template<typename ValueT, typename IndexT>
-class alignas(std::max(alignof(ValueT), alignof(IndexT))) cell {
+class alignas(alignof(cell_value_t<ValueT, IndexT>)) cell {
     using value_type = ValueT;
     using index_type = IndexT;
     using cell_as_value = cell_value_t<value_type, index_type>;
@@ -87,7 +92,7 @@ public:
         if constexpr (sizeof(cell_as_value) == 16 && CELL_USE_BUILTIN_16B) {
             return __sync_val_compare_and_swap(this->u_.value_, 0, 0);
         } else {
-            return reinterpret_cast<std::atomic<cell_as_value>*>(this)->load();
+            return reinterpret_cast<const std::atomic<cell_as_value>*>(this)->load();
         }
     }
 

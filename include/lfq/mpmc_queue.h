@@ -8,7 +8,7 @@ namespace lfq {
 namespace detail {
 // Typical x86/ARM cache line size, used to keep head_/tail_ on separate
 // cache lines and avoid false sharing between producer and consumer threads.
-constexpr size_t kCacheLineSize = 64;
+static constexpr size_t CACHELINE_SIZE = 64;   
 } // namespace detail
 
 // Bounded multi-producer / multi-consumer queue.
@@ -18,21 +18,21 @@ constexpr size_t kCacheLineSize = 64;
 // but not yet implemented. See the TODO in the private section for the
 // intended (Vyukov-style) algorithm shape.
 template <typename T, size_t Capacity>
-class MPMCQueue {
+class mpmc_queue {
     static_assert(Capacity >= 2, "Capacity must be at least 2");
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
 
 public:
-    MPMCQueue() {
+    mpmc_queue() {
         for (size_t i = 0; i < Capacity; ++i) {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
 
-    MPMCQueue(const MPMCQueue&) = delete;
-    MPMCQueue& operator=(const MPMCQueue&) = delete;
-    MPMCQueue(MPMCQueue&&) = delete;
-    MPMCQueue& operator=(MPMCQueue&&) = delete;
+    mpmc_queue(const mpmc_queue&) = delete;
+    mpmc_queue& operator=(const mpmc_queue&) = delete;
+    mpmc_queue(mpmc_queue&&) = delete;
+    mpmc_queue& operator=(mpmc_queue&&) = delete;
 
     // Attempts to enqueue `value`. Returns false if the queue is full.
     bool try_push(const T& value);
@@ -42,7 +42,7 @@ public:
     bool try_pop(T& out);
 
 private:
-    struct Cell {
+    struct cell {
         std::atomic<size_t> sequence;
         T data;
     };
@@ -77,11 +77,11 @@ private:
     // Work out the memory ordering and the full/empty conditions yourself —
     // that's the point of this exercise.
 
-    alignas(detail::kCacheLineSize) std::atomic<size_t> tail_{0};
-    alignas(detail::kCacheLineSize) std::atomic<size_t> head_{0};
+    alignas(detail::CACHELINE_SIZE) std::atomic<size_t> tail_{0};
+    alignas(detail::CACHELINE_SIZE) std::atomic<size_t> head_{0};
 
     static constexpr size_t mask_ = Capacity - 1;
-    Cell buffer_[Capacity];
+    cell buffer_[Capacity];
 };
 
 } // namespace lfq
