@@ -9,9 +9,9 @@ namespace lfq {
 
 __extension__ using uint128_t = unsigned __int128;
 
-template<size_t S> struct unit_value;
-template<> struct unit_value<8> { using type = uint64_t; };
-template<> struct unit_value<16> { using type = uint128_t; };
+template<size_t S> struct uint_of_size;
+template<> struct uint_of_size<8> { using type = uint64_t; };
+template<> struct uint_of_size<16> { using type = uint128_t; };
 
 inline static constexpr bool CELL_USE_BUILTIN_16B =
 #if defined(__GNUC__) && !defined(__clang__)
@@ -22,85 +22,88 @@ inline static constexpr bool CELL_USE_BUILTIN_16B =
 ;
 
 namespace detail {
+// Never instantiated for its data -- exists only so sizeof() can measure
+// the natural combined size of a {ValueT, IndexT} pair before picking a
+// packed word type for it.
 template<typename ValueT, typename IndexT>
-struct alignas(8) helper_cell {
+struct alignas(8) size_probe {
     ValueT d_;
     IndexT i_;
 };
 } // namespace detail
 
 template<typename ValueT, typename IndexT>
-using cell_value_t = typename unit_value<sizeof(detail::helper_cell<ValueT, IndexT>)>::type;
+using cell_word_t = typename uint_of_size<sizeof(detail::size_probe<ValueT, IndexT>)>::type;
 
 template<typename ValueT, typename IndexT>
-class alignas(alignof(cell_value_t<ValueT, IndexT>)) cell {
+class alignas(alignof(cell_word_t<ValueT, IndexT>)) cell {
     using value_type = ValueT;
     using index_type = IndexT;
-    using cell_as_value = cell_value_t<value_type, index_type>;
+    using word_type = cell_word_t<value_type, index_type>;
 
-    union cell_union {
-        cell_as_value value_;
-        struct cell_data {
+    union storage {
+        word_type word_;
+        struct fields {
             value_type data_;
             index_type seq_;
-        } x_;
-        cell_union() { value_ = 0; }
-    } u_;
+        } fields_;
+        storage() { word_ = 0; }
+    } storage_;
 
 
 public:
     cell() noexcept { clear(); }
-    explicit cell(index_type seq) noexcept { 
+    explicit cell(index_type seq) noexcept {
         clear();
-        u_.x_.seq_ = seq; 
+        storage_.fields_.seq_ = seq;
     }
     explicit cell(const value_type data, index_type seq) noexcept {
         clear();
-        u_.x_.data_ = data; 
-        u_.x_.seq_ = seq; 
+        storage_.fields_.data_ = data;
+        storage_.fields_.seq_ = seq;
     }
-    explicit cell(cell_as_value value) {
-        u_.value_ = value;
+    explicit cell(word_type value) {
+        storage_.word_ = value;
     }
     ~cell() noexcept = default;
 
-    void clear() noexcept { u_.value_ = 0; }
+    void clear() noexcept { storage_.word_ = 0; }
 
-    void set_seq(index_type seq) noexcept { 
+    void set_seq(index_type seq) noexcept {
         clear();
-        u_.x_.seq_ = seq; 
+        storage_.fields_.seq_ = seq;
     }
     void set(value_type data, index_type seq) noexcept {
         clear();
-        u_.x_.data_ = data; 
-        u_.x_.seq_ = seq; 
+        storage_.fields_.data_ = data;
+        storage_.fields_.seq_ = seq;
     }
 
-    cell_as_value value() const noexcept { return u_.value_; }
-    value_type get_data() const noexcept { return u_.x_.data_; }
-    index_type get_seq() const noexcept { return u_.x_.seq_; }
+    word_type value() const noexcept { return storage_.word_; }
+    value_type get_data() const noexcept { return storage_.fields_.data_; }
+    index_type get_seq() const noexcept { return storage_.fields_.seq_; }
 
-    bool is_empty() const noexcept { return !(u_.x_.seq_ & 1U); }
-    bool is_full() const noexcept { return (u_.x_.seq_ & 1U); }
+    bool is_empty() const noexcept { return !(storage_.fields_.seq_ & 1U); }
+    bool is_full() const noexcept { return (storage_.fields_.seq_ & 1U); }
 
-    cell& operator=(cell_as_value value) noexcept {
-        u_.value_ = value;
+    cell& operator=(word_type value) noexcept {
+        storage_.word_ = value;
         return *this;
     }
 
-    [[using gnu: hot]] cell_as_value load() const noexcept { 
-        if constexpr (sizeof(cell_as_value) == 16 && CELL_USE_BUILTIN_16B) {
-            return __sync_val_compare_and_swap(this->u_.value_, 0, 0);
+    [[using gnu: hot]] word_type load() const noexcept {
+        if constexpr (sizeof(word_type) == 16 && CELL_USE_BUILTIN_16B) {
+            return __sync_val_compare_and_swap(this->storage_.word_, 0, 0);
         } else {
-            return reinterpret_cast<const std::atomic<cell_as_value>*>(this)->load();
+            return reinterpret_cast<const std::atomic<word_type>*>(this)->load();
         }
     }
 
     [[using gnu: hot]] bool compare_exchange(cell expected, cell desired) noexcept {
-        if constexpr (sizeof(cell_as_value) == 16 && CELL_USE_BUILTIN_16B) {
-            return __sync_bool_compare_and_swap(&this->u_.value_, expected.u_.value_, desired.u_.value_);
+        if constexpr (sizeof(word_type) == 16 && CELL_USE_BUILTIN_16B) {
+            return __sync_bool_compare_and_swap(&this->storage_.word_, expected.storage_.word_, desired.storage_.word_);
         } else {
-            return reinterpret_cast<std::atomic<cell_as_value>*>(this)->compare_exchange_strong(expected.u_.value_, desired.u_.value_);
+            return reinterpret_cast<std::atomic<word_type>*>(this)->compare_exchange_strong(expected.storage_.word_, desired.storage_.word_);
         }
     }
 
