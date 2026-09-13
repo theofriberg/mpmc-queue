@@ -14,6 +14,7 @@ find_package(Threads REQUIRED)
 add_library(lfq INTERFACE)
 target_include_directories(lfq INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_executable(smoke_test src/main.cc)
+add_executable(smoke_test src/main.cc
+    include/lfq/cell.h)
 target_link_libraries(smoke_test PRIVATE lfq Threads::Threads)
 target_compile_options(smoke_test PRIVATE -Wall -Wextra -Wpedantic)
