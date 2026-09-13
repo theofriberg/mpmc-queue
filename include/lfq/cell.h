@@ -50,6 +50,14 @@ class alignas(alignof(cell_word_t<ValueT, IndexT>)) cell {
         storage() { word_ = 0; }
     } storage_;
 
+    // Decodes an already-loaded word into its {data, seq} view. `raw` is a
+    // local value (a snapshot from load()), so this itself never touches
+    // shared memory.
+    static typename storage::fields decode(word_type raw) noexcept {
+        storage tmp;
+        tmp.word_ = raw;
+        return tmp.fields_;
+    }
 
 public:
     cell() noexcept { clear(); }
@@ -79,12 +87,18 @@ public:
         storage_.fields_.seq_ = seq;
     }
 
-    word_type value() const noexcept { return storage_.word_; }
-    value_type get_data() const noexcept { return storage_.fields_.data_; }
-    index_type get_seq() const noexcept { return storage_.fields_.seq_; }
+    // These decode a word_type already returned by load() (an atomic read
+    // of the shared cell), never the live storage_ directly -- storage_ is
+    // read/written non-atomically elsewhere (constructors, clear/set,
+    // operator=), which is only safe on a cell not yet visible to other
+    // threads. Reading storage_ directly here would race with a concurrent
+    // compare_exchange()/load() on the same cell from another thread.
+    word_type value() const noexcept { return load(); }
+    value_type get_data() const noexcept { return decode(load()).data_; }
+    index_type get_seq() const noexcept { return decode(load()).seq_; }
 
-    bool is_empty() const noexcept { return !(storage_.fields_.seq_ & 1U); }
-    bool is_full() const noexcept { return (storage_.fields_.seq_ & 1U); }
+    bool is_empty() const noexcept { return !(get_seq() & 1U); }
+    bool is_full() const noexcept { return (get_seq() & 1U); }
 
     cell& operator=(word_type value) noexcept {
         storage_.word_ = value;
