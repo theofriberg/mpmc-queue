@@ -63,6 +63,26 @@ public:
         }
     }
 
+    [[using gnu: hot]] bool pop(value_type& value) noexcept {
+        while (true) {
+            index_type head = head_.load();
+            cell_type snapshot{buffer_[head].load()};
+
+            if (snapshot.get_seq() == static_cast<index_type>((head << 1) | 1U)) {
+                cell_type empty_cell{static_cast<index_type>((head + buffer_.size()) << 1)};
+                if (buffer_[head].compare_exchange(snapshot, empty_cell)) {
+                    value = snapshot.get_data();
+                    head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    return true;
+                }
+            } else if (static_cast<index_type>(snapshot.get_seq() | 1U) == static_cast<index_type>(((head + buffer_.size()) << 1) | 1U)) {
+                head_.compare_exchange_strong(head, head + 1);
+            } else if (snapshot.get_seq() == static_cast<index_type>(head << 1)) {
+                return false; // queue is empty
+            }
+        }
+    }
+
 private:
     alignas(detail::CACHELINE_SIZE) std::atomic<index_type> tail_{0};
     alignas(detail::CACHELINE_SIZE) std::atomic<index_type> head_{0};
