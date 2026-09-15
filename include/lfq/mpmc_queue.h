@@ -11,7 +11,7 @@ namespace lfq {
 namespace detail {
 // Typical x86/ARM cache line size, used to keep head_/tail_ on separate
 // cache lines and avoid false sharing between producer and consumer threads.
-inline static constexpr size_t CACHELINE_SIZE = 64;   
+inline constexpr size_t CACHELINE_SIZE = 64; 
 } // namespace detail
 
 // Bounded multi-producer / multi-consumer queue.
@@ -42,7 +42,7 @@ public:
     mpmc_queue(mpmc_queue&&) = delete;
     mpmc_queue& operator=(mpmc_queue&&) = delete;
 
-    [[using gnu: hot]] bool push(value_type value) noexcept {
+    [[using gnu: hot, flatten]] bool push(value_type value) noexcept {
         while (true) {
             index_type tail = tail_.load();
             index_type seq = buffer_[tail].get_seq();
@@ -63,7 +63,7 @@ public:
         }
     }
 
-    [[using gnu: hot]] bool pop(value_type& value) noexcept {
+    [[using gnu: hot, flatten]] bool pop(value_type& value) noexcept {
         while (true) {
             index_type head = head_.load();
             cell_type snapshot{buffer_[head].load()};
@@ -75,7 +75,22 @@ public:
                     head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
                     return true;
                 }
-            } else if (static_cast<index_type>(snapshot.get_seq() | 1U) == static_cast<index_type>(((head + buffer_.size()) << 1) | 1U)) {
+            } else if (snapshot.get_seq() == static_cast<index_type>((head + buffer_.size()) << 1)) {
+                head_.compare_exchange_strong(head, head + 1);
+            } else if (snapshot.get_seq() == static_cast<index_type>(head << 1)) {
+                return false; // queue is empty
+            }
+        }
+    }
+
+    [[using gnu: hot, flatten]] bool peek(value_type& value) noexcept {
+        while (true) {
+            index_type head = head_.load();
+            cell_type snapshot{buffer_[head].load()};
+            if (snapshot.get_seq() == static_cast<index_type>((head << 1) | 1U)) {
+                value = snapshot.get_data();
+                return true;
+            } else if (snapshot.get_seq() == static_cast<index_type>((head + buffer_.size()) << 1)) {
                 head_.compare_exchange_strong(head, head + 1);
             } else if (snapshot.get_seq() == static_cast<index_type>(head << 1)) {
                 return false; // queue is empty

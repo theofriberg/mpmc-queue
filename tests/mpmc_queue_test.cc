@@ -182,4 +182,146 @@ TEST(MpmcQueuePopTest, ConcurrentPushPopMovesEveryValueExactlyOnce) {
     }
 }
 
+TEST(MpmcQueuePeekTest, PeekOnEmptyQueueFails) {
+    lfq::mpmc_queue<int, 8> q;
+    int value = -1;
+    EXPECT_FALSE(q.peek(value));
+    EXPECT_EQ(value, -1);  // untouched on failure
+}
+
+TEST(MpmcQueuePeekTest, PeekReturnsFrontValueWithoutRemovingIt) {
+    lfq::mpmc_queue<int, 8> q;
+    ASSERT_TRUE(q.push(42));
+
+    int value = -1;
+    EXPECT_TRUE(q.peek(value));
+    EXPECT_EQ(value, 42);
+
+    // peek() must not have consumed the value -- it's still there to pop.
+    value = -1;
+    EXPECT_TRUE(q.pop(value));
+    EXPECT_EQ(value, 42);
+    EXPECT_FALSE(q.pop(value));
+}
+
+TEST(MpmcQueuePeekTest, RepeatedPeeksReturnSameFrontValue) {
+    lfq::mpmc_queue<int, 8> q;
+    ASSERT_TRUE(q.push(7));
+    ASSERT_TRUE(q.push(8));
+
+    int value = -1;
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(q.peek(value));
+        EXPECT_EQ(value, 7);  // still the front -- nothing consumed it
+    }
+}
+
+TEST(MpmcQueuePeekTest, PeekTracksFrontAcrossPops) {
+    lfq::mpmc_queue<int, 8> q;
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(q.push(i));
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        int value = -1;
+        EXPECT_TRUE(q.peek(value));
+        EXPECT_EQ(value, i);
+
+        int popped = -1;
+        EXPECT_TRUE(q.pop(popped));
+        EXPECT_EQ(popped, i);
+    }
+    int value = -1;
+    EXPECT_FALSE(q.peek(value));
+}
+
+// Exercises the "recycled cell" branch of peek() (a cell already popped by
+// another consumer, seq == (head + capacity) << 1), which push()/pop() also
+// hit but peek() must handle without ever CAS-ing the cell itself.
+TEST(MpmcQueuePeekTest, PeekSurvivesMultipleLapsAroundTheRing) {
+    constexpr std::size_t kCapacity = 4;
+    lfq::mpmc_queue<int, kCapacity> q;
+
+    for (int lap = 0; lap < 5; ++lap) {
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            ASSERT_TRUE(q.push(lap * 100 + static_cast<int>(i))) << "lap " << lap << " push " << i;
+        }
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            int peeked = -1;
+            EXPECT_TRUE(q.peek(peeked)) << "lap " << lap << " peek " << i;
+            EXPECT_EQ(peeked, lap * 100 + static_cast<int>(i));
+
+            int popped = -1;
+            ASSERT_TRUE(q.pop(popped)) << "lap " << lap << " pop " << i;
+            EXPECT_EQ(popped, lap * 100 + static_cast<int>(i));
+        }
+        int value = -1;
+        EXPECT_FALSE(q.peek(value)) << "lap " << lap << " should be empty";
+    }
+}
+
+// Concurrent producers and consumers, with every consumer peek()-ing
+// (without side effects on the popped count) immediately before pop()-ing.
+// If peek() ever advanced past a live, unconsumed element, or corrupted
+// state shared with pop()/push() under contention, this would show up as a
+// wrong total or a duplicate/lost value -- same invariant as
+// ConcurrentPushPopMovesEveryValueExactlyOnce, with peek() added to the mix.
+TEST(MpmcQueuePeekTest, ConcurrentPeekAndPopDoNotLoseOrDuplicateValues) {
+    constexpr std::size_t kCapacity = 64;
+    constexpr int kProducers = 8;
+    constexpr int kConsumers = 8;
+    constexpr int kAttemptsPerProducer = 2000;
+    constexpr int kTotalPushed = kProducers * kAttemptsPerProducer;
+
+    lfq::mpmc_queue<int, kCapacity> q;
+    std::atomic<int> push_success_count{0};
+    std::atomic<int> pop_success_count{0};
+    std::vector<std::atomic<int>> seen(kTotalPushed);
+    for (auto& s : seen) {
+        s.store(0, std::memory_order_relaxed);
+    }
+
+    std::vector<std::thread> threads;
+    threads.reserve(kProducers + kConsumers);
+
+    for (int p = 0; p < kProducers; ++p) {
+        threads.emplace_back([&, p] {
+            for (int i = 0; i < kAttemptsPerProducer; ++i) {
+                while (!q.push(p * kAttemptsPerProducer + i)) {
+                    std::this_thread::yield();
+                }
+                push_success_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (int c = 0; c < kConsumers; ++c) {
+        threads.emplace_back([&] {
+            while (pop_success_count.load(std::memory_order_relaxed) < kTotalPushed) {
+                int peeked = -1;
+                q.peek(peeked);  // result ignored -- just exercising it concurrently
+
+                int value = -1;
+                if (q.pop(value)) {
+                    ASSERT_GE(value, 0);
+                    ASSERT_LT(value, kTotalPushed);
+                    EXPECT_EQ(seen[static_cast<std::size_t>(value)].fetch_add(1, std::memory_order_relaxed), 0)
+                        << "value " << value << " popped more than once";
+                    pop_success_count.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    EXPECT_EQ(push_success_count.load(), kTotalPushed);
+    EXPECT_EQ(pop_success_count.load(), kTotalPushed);
+    for (int i = 0; i < kTotalPushed; ++i) {
+        EXPECT_EQ(seen[static_cast<std::size_t>(i)].load(), 1) << "value " << i << " was never popped";
+    }
+}
+
 }  // namespace
