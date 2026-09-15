@@ -20,7 +20,7 @@ inline constexpr size_t CACHELINE_SIZE = 64;
 // instead of a modulo). This is a skeleton: try_push/try_pop are declared
 // but not yet implemented. See the TODO in the private section for the
 // intended (Vyukov-style) algorithm shape.
-template <typename ValueT, size_t capacity, typename IndexT = uint32_t>
+template <typename ValueT, size_t capacity, typename IndexT = uint32_t, bool lazy_push = false, bool lazy_pop = false>
 class mpmc_queue {
     using value_type = ValueT;
     using index_type = IndexT;
@@ -51,7 +51,9 @@ public:
                 cell_type expected{static_cast<index_type>(tail << 1)};
                 cell_type desired{value, static_cast<index_type>((tail << 1) | 1U)};
                 if (buffer_[tail].compare_exchange(expected, desired)) {
-                    tail_.compare_exchange_strong(tail, tail + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    if constexpr (!lazy_push) {
+                        tail_.compare_exchange_strong(tail, tail + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    }
                     return true;
                 }
             } else if (seq == static_cast<index_type>((tail << 1) | 1U) ||
@@ -72,10 +74,12 @@ public:
                 cell_type empty_cell{static_cast<index_type>((head + buffer_.size()) << 1)};
                 if (buffer_[head].compare_exchange(snapshot, empty_cell)) {
                     value = snapshot.get_data();
-                    head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    if constexpr (!lazy_pop) {
+                        head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    }
                     return true;
                 }
-            } else if (snapshot.get_seq() == static_cast<index_type>((head + buffer_.size()) << 1)) {
+            } else if (static_cast<index_type>(snapshot.get_seq() | 1U) == static_cast<index_type>(((head + buffer_.size()) << 1) | 1U)) {
                 head_.compare_exchange_strong(head, head + 1);
             } else if (snapshot.get_seq() == static_cast<index_type>(head << 1)) {
                 return false; // queue is empty
