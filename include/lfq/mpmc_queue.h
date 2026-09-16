@@ -102,6 +102,20 @@ public:
         }
     }
 
+    [[using gnu: hot, flatten]] [[nodiscard]] bool empty() noexcept {
+        while (true) {
+            index_type head = head_.load();
+            index_type seq = buffer_[head].get_seq();
+            if (seq == static_cast<index_type>(head << 1)) {
+                return true;
+            } else if (static_cast<index_type>(seq | 1U) == static_cast<index_type>(((head + buffer_.size()) << 1) | 1U)) {
+                head_.compare_exchange_strong(head, head + 1);
+            } else {
+                return false;
+            }
+        }
+    }
+
 private:
     alignas(detail::CACHELINE_SIZE) std::atomic<index_type> tail_{0};
     alignas(detail::CACHELINE_SIZE) std::atomic<index_type> head_{0};

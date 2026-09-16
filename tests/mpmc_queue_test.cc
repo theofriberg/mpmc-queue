@@ -326,6 +326,103 @@ TEST(MpmcQueuePeekTest, ConcurrentPeekAndPopDoNotLoseOrDuplicateValues) {
     }
 }
 
+TEST(MpmcQueueEmptyTest, DefaultConstructedQueueIsEmpty) {
+    lfq::mpmc_queue<int, 8> q;
+    EXPECT_TRUE(q.empty());
+}
+
+TEST(MpmcQueueEmptyTest, NotEmptyAfterPush) {
+    lfq::mpmc_queue<int, 8> q;
+    ASSERT_TRUE(q.push(1));
+    EXPECT_FALSE(q.empty());
+}
+
+TEST(MpmcQueueEmptyTest, EmptyAgainAfterPushThenPop) {
+    lfq::mpmc_queue<int, 8> q;
+    ASSERT_TRUE(q.push(1));
+
+    int value = -1;
+    ASSERT_TRUE(q.pop(value));
+    EXPECT_TRUE(q.empty());
+}
+
+TEST(MpmcQueueEmptyTest, NotEmptyUntilAllElementsArePopped) {
+    lfq::mpmc_queue<int, 8> q;
+    for (int i = 0; i < 4; ++i) {
+        ASSERT_TRUE(q.push(i));
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FALSE(q.empty()) << "should still report non-empty before pop " << i;
+        int value = -1;
+        ASSERT_TRUE(q.pop(value));
+    }
+    EXPECT_TRUE(q.empty());
+}
+
+TEST(MpmcQueueEmptyTest, TracksEmptinessAcrossMultipleLapsAroundTheRing) {
+    constexpr std::size_t kCapacity = 4;
+    lfq::mpmc_queue<int, kCapacity> q;
+
+    for (int lap = 0; lap < 5; ++lap) {
+        EXPECT_TRUE(q.empty()) << "lap " << lap << " should start empty";
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            ASSERT_TRUE(q.push(lap * 100 + static_cast<int>(i)));
+            EXPECT_FALSE(q.empty()) << "lap " << lap << " push " << i;
+        }
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            int value = -1;
+            ASSERT_TRUE(q.pop(value));
+        }
+    }
+    EXPECT_TRUE(q.empty());
+}
+
+// Concurrent producers and consumers, mirroring the other Concurrent* tests:
+// only the final state (after every thread has joined) is checked, since
+// empty() is inherently a racy, instant-in-time snapshot while other threads
+// are actively pushing/popping -- there is no promise it's accurate mid-flight.
+TEST(MpmcQueueEmptyTest, ReportsEmptyOnceAllConcurrentWorkIsDrained) {
+    constexpr std::size_t kCapacity = 64;
+    constexpr int kProducers = 8;
+    constexpr int kConsumers = 8;
+    constexpr int kAttemptsPerProducer = 2000;
+    constexpr int kTotalPushed = kProducers * kAttemptsPerProducer;
+
+    lfq::mpmc_queue<int, kCapacity> q;
+    std::atomic<int> pop_success_count{0};
+
+    std::vector<std::thread> threads;
+    threads.reserve(kProducers + kConsumers);
+
+    for (int p = 0; p < kProducers; ++p) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < kAttemptsPerProducer; ++i) {
+                while (!q.push(i)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (int c = 0; c < kConsumers; ++c) {
+        threads.emplace_back([&] {
+            while (pop_success_count.load(std::memory_order_relaxed) < kTotalPushed) {
+                int value = -1;
+                if (q.pop(value)) {
+                    pop_success_count.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    EXPECT_TRUE(q.empty());
+}
+
 // lazy_push/lazy_pop defer the tail_/head_ advancement CAS: a successful
 // push()/pop() that claims/releases a cell doesn't also bump the shared
 // index right away, leaving it to be noticed and bumped by a later call
@@ -392,6 +489,31 @@ TYPED_TEST(MpmcQueueLazyTest, FillsToCapacityThenReportsFull) {
     // A deferred tail_ bump (lazy_push) must not make the fullness check see
     // a stale, not-yet-advanced tail_ as "still room here".
     EXPECT_FALSE(q.push(999));
+}
+
+// empty() has no equivalent of pop()/peek()'s "recycled cell" catch-up
+// branch -- it never nudges a stale head_ forward. With lazy_pop, every
+// successful pop() leaves head_ pointing at the *previous* round instead of
+// the one it just claimed (the next call's own catch-up step is what
+// belatedly corrects it -- see the pop() review). If nothing calls
+// pop()/peek() again after the last element is drained, head_ never gets
+// that final nudge, so a queue that is genuinely, permanently empty can
+// still read as non-empty. This drains serially with no further pop()/peek()
+// calls afterwards, so it isn't racy -- it's a deterministic check of
+// whatever state pop() leaves head_ in.
+TYPED_TEST(MpmcQueueLazyTest, EmptyReportsTrueAfterFullyDraining) {
+    constexpr int kCapacity = 4;
+    TypeParam q;
+
+    for (int i = 0; i < kCapacity; ++i) {
+        ASSERT_TRUE(q.push(i));
+    }
+    for (int i = 0; i < kCapacity; ++i) {
+        int value = -1;
+        ASSERT_TRUE(q.pop(value));
+    }
+
+    EXPECT_TRUE(q.empty());
 }
 
 // Drives the ring through several full laps of push/peek/pop, the same way
