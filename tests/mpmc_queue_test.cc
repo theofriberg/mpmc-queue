@@ -3,8 +3,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -66,6 +68,90 @@ TEST(MpmcQueuePushTest, ConcurrentPushesSucceedExactlyCapacityTimes) {
     }
 
     EXPECT_EQ(success_count.load(), static_cast<int>(kCapacity));
+}
+
+TEST(MpmcQueuePushIndexTest, FirstPushReturnsIndexZero) {
+    lfq::mpmc_queue<int, 8> q;
+    std::uint32_t index = 999;
+    EXPECT_TRUE(q.push(42, index));
+    EXPECT_EQ(index, 0U);
+}
+
+TEST(MpmcQueuePushIndexTest, SequentialPushesReturnIncreasingIndices) {
+    lfq::mpmc_queue<int, 8> q;
+    for (std::uint32_t i = 0; i < 5; ++i) {
+        std::uint32_t index = 999;
+        ASSERT_TRUE(q.push(static_cast<int>(i), index));
+        EXPECT_EQ(index, i);
+    }
+}
+
+TEST(MpmcQueuePushIndexTest, IndexUntouchedWhenQueueIsFull) {
+    constexpr std::size_t kCapacity = 8;
+    lfq::mpmc_queue<int, kCapacity> q;
+    std::uint32_t index = 999;
+    for (std::size_t i = 0; i < kCapacity; ++i) {
+        ASSERT_TRUE(q.push(static_cast<int>(i), index));
+    }
+
+    index = 999;
+    EXPECT_FALSE(q.push(-1, index));
+    EXPECT_EQ(index, 999U);  // untouched on failure
+}
+
+// The index returned to the caller is the ring's raw, ever-increasing tail
+// counter (the value the algorithm CAS-checks against a cell's seq), not the
+// physical slot number -- it keeps climbing past kCapacity on every lap
+// instead of wrapping back into [0, kCapacity). Physical slot is index %
+// kCapacity if a caller needs it.
+TEST(MpmcQueuePushIndexTest, IndexKeepsIncreasingAcrossMultipleLapsAroundTheRing) {
+    constexpr std::size_t kCapacity = 4;
+    lfq::mpmc_queue<int, kCapacity> q;
+
+    for (std::uint32_t lap = 0; lap < 5; ++lap) {
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            std::uint32_t index = 999;
+            ASSERT_TRUE(q.push(static_cast<int>(i), index)) << "lap " << lap << " push " << i;
+            EXPECT_EQ(index, static_cast<std::uint32_t>(lap * kCapacity + i)) << "lap " << lap << " push " << i;
+        }
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            int value = -1;
+            ASSERT_TRUE(q.pop(value));
+        }
+    }
+}
+
+// Regression-style test mirroring ConcurrentPushesSucceedExactlyCapacityTimes:
+// with many producers racing to CAS the same cells, every index handed back
+// on a successful push must be globally unique -- a duplicate would mean two
+// producers were told they both won the same cell.
+TEST(MpmcQueuePushIndexTest, ConcurrentPushesReturnGloballyUniqueIndices) {
+    constexpr std::size_t kCapacity = 64;
+    constexpr int kProducers = 8;
+    constexpr int kAttemptsPerProducer = 2000;
+
+    lfq::mpmc_queue<int, kCapacity> q;
+    std::mutex mtx;
+    std::unordered_set<std::uint32_t> seen_indices;
+
+    std::vector<std::thread> producers;
+    producers.reserve(kProducers);
+    for (int p = 0; p < kProducers; ++p) {
+        producers.emplace_back([&, p] {
+            for (int i = 0; i < kAttemptsPerProducer; ++i) {
+                std::uint32_t index = 0;
+                if (q.push(p * kAttemptsPerProducer + i, index)) {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    EXPECT_TRUE(seen_indices.insert(index).second) << "duplicate index " << index;
+                }
+            }
+        });
+    }
+    for (auto& t : producers) {
+        t.join();
+    }
+
+    EXPECT_EQ(seen_indices.size(), kCapacity);
 }
 
 TEST(MpmcQueuePopTest, PopFromEmptyQueueFails) {
@@ -182,6 +268,117 @@ TEST(MpmcQueuePopTest, ConcurrentPushPopMovesEveryValueExactlyOnce) {
     for (int i = 0; i < kTotalPushed; ++i) {
         EXPECT_EQ(seen[static_cast<std::size_t>(i)].load(), 1) << "value " << i << " was never popped";
     }
+}
+
+TEST(MpmcQueuePopIndexTest, PopFromEmptyQueueLeavesIndexUntouched) {
+    lfq::mpmc_queue<int, 8> q;
+    int value = -1;
+    std::uint32_t index = 999;
+    EXPECT_FALSE(q.pop(value, index));
+    EXPECT_EQ(index, 999U);  // untouched on failure
+}
+
+TEST(MpmcQueuePopIndexTest, PushThenPopReturnsMatchingIndex) {
+    lfq::mpmc_queue<int, 8> q;
+    std::uint32_t push_index = 999;
+    ASSERT_TRUE(q.push(42, push_index));
+
+    int value = -1;
+    std::uint32_t pop_index = 999;
+    EXPECT_TRUE(q.pop(value, pop_index));
+    EXPECT_EQ(value, 42);
+    EXPECT_EQ(pop_index, push_index);
+}
+
+// head_ and tail_ are both raw, ever-increasing counters starting at 0, and
+// the queue is strictly FIFO, so the k-th successful pop must be handed back
+// the exact same index the k-th successful push was handed -- not just the
+// same value.
+TEST(MpmcQueuePopIndexTest, PopsReturnIndicesMatchingOriginalPushIndices) {
+    lfq::mpmc_queue<int, 8> q;
+    std::vector<std::uint32_t> push_indices;
+    for (int i = 0; i < 5; ++i) {
+        std::uint32_t index = 999;
+        ASSERT_TRUE(q.push(i, index));
+        push_indices.push_back(index);
+    }
+
+    for (int i = 0; i < 5; ++i) {
+        int value = -1;
+        std::uint32_t index = 999;
+        EXPECT_TRUE(q.pop(value, index));
+        EXPECT_EQ(value, i);
+        EXPECT_EQ(index, push_indices[static_cast<std::size_t>(i)]);
+    }
+}
+
+TEST(MpmcQueuePopIndexTest, IndexKeepsIncreasingAcrossMultipleLapsAroundTheRing) {
+    constexpr std::size_t kCapacity = 4;
+    lfq::mpmc_queue<int, kCapacity> q;
+
+    for (std::uint32_t lap = 0; lap < 5; ++lap) {
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            ASSERT_TRUE(q.push(static_cast<int>(i)));
+        }
+        for (std::size_t i = 0; i < kCapacity; ++i) {
+            int value = -1;
+            std::uint32_t index = 999;
+            ASSERT_TRUE(q.pop(value, index)) << "lap " << lap << " pop " << i;
+            EXPECT_EQ(index, static_cast<std::uint32_t>(lap * kCapacity + i)) << "lap " << lap << " pop " << i;
+        }
+    }
+}
+
+// Regression-style test mirroring ConcurrentPushPopMovesEveryValueExactlyOnce:
+// many consumers race to CAS the same cells, so every index handed back on a
+// successful pop must be globally unique -- a duplicate would mean two
+// consumers were told they both drained the same cell.
+TEST(MpmcQueuePopIndexTest, ConcurrentPopsReturnGloballyUniqueIndices) {
+    constexpr std::size_t kCapacity = 64;
+    constexpr int kProducers = 8;
+    constexpr int kConsumers = 8;
+    constexpr int kAttemptsPerProducer = 2000;
+    constexpr int kTotalPushed = kProducers * kAttemptsPerProducer;
+
+    lfq::mpmc_queue<int, kCapacity> q;
+    std::atomic<int> pop_success_count{0};
+    std::mutex mtx;
+    std::unordered_set<std::uint32_t> seen_indices;
+
+    std::vector<std::thread> threads;
+    threads.reserve(kProducers + kConsumers);
+
+    for (int p = 0; p < kProducers; ++p) {
+        threads.emplace_back([&, p] {
+            for (int i = 0; i < kAttemptsPerProducer; ++i) {
+                while (!q.push(p * kAttemptsPerProducer + i)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (int c = 0; c < kConsumers; ++c) {
+        threads.emplace_back([&] {
+            while (pop_success_count.load(std::memory_order_relaxed) < kTotalPushed) {
+                int value = -1;
+                std::uint32_t index = 0;
+                if (q.pop(value, index)) {
+                    {
+                        std::lock_guard<std::mutex> lock(mtx);
+                        EXPECT_TRUE(seen_indices.insert(index).second) << "duplicate index " << index;
+                    }
+                    pop_success_count.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    EXPECT_EQ(seen_indices.size(), static_cast<std::size_t>(kTotalPushed));
 }
 
 TEST(MpmcQueuePeekTest, PeekOnEmptyQueueFails) {
@@ -323,6 +520,65 @@ TEST(MpmcQueuePeekTest, ConcurrentPeekAndPopDoNotLoseOrDuplicateValues) {
     EXPECT_EQ(pop_success_count.load(), kTotalPushed);
     for (int i = 0; i < kTotalPushed; ++i) {
         EXPECT_EQ(seen[static_cast<std::size_t>(i)].load(), 1) << "value " << i << " was never popped";
+    }
+}
+
+TEST(MpmcQueuePeekIndexTest, PeekOnEmptyQueueLeavesIndexUntouched) {
+    lfq::mpmc_queue<int, 8> q;
+    int value = -1;
+    std::uint32_t index = 999;
+    EXPECT_FALSE(q.peek(value, index));
+    EXPECT_EQ(index, 999U);  // untouched on failure
+}
+
+TEST(MpmcQueuePeekIndexTest, PeekReturnsSameIndexAsSubsequentPop) {
+    lfq::mpmc_queue<int, 8> q;
+    std::uint32_t push_index = 999;
+    ASSERT_TRUE(q.push(42, push_index));
+
+    int peeked = -1;
+    std::uint32_t peek_index = 999;
+    EXPECT_TRUE(q.peek(peeked, peek_index));
+    EXPECT_EQ(peek_index, push_index);
+
+    int popped = -1;
+    std::uint32_t pop_index = 999;
+    EXPECT_TRUE(q.pop(popped, pop_index));
+    EXPECT_EQ(pop_index, peek_index);
+}
+
+TEST(MpmcQueuePeekIndexTest, RepeatedPeeksReturnSameIndex) {
+    lfq::mpmc_queue<int, 8> q;
+    ASSERT_TRUE(q.push(7));
+    ASSERT_TRUE(q.push(8));
+
+    int value = -1;
+    std::uint32_t index = 999;
+    EXPECT_TRUE(q.peek(value, index));
+    for (int i = 0; i < 3; ++i) {
+        int repeat_value = -1;
+        std::uint32_t repeat_index = 999;
+        EXPECT_TRUE(q.peek(repeat_value, repeat_index));
+        EXPECT_EQ(repeat_value, value);
+        EXPECT_EQ(repeat_index, index);
+    }
+}
+
+TEST(MpmcQueuePeekIndexTest, PeekIndexTracksFrontAcrossPops) {
+    lfq::mpmc_queue<int, 8> q;
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(q.push(i));
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        int peeked = -1;
+        std::uint32_t peek_index = 999;
+        EXPECT_TRUE(q.peek(peeked, peek_index));
+
+        int popped = -1;
+        std::uint32_t pop_index = 999;
+        EXPECT_TRUE(q.pop(popped, pop_index));
+        EXPECT_EQ(pop_index, peek_index);
     }
 }
 

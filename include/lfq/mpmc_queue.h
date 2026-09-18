@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 
@@ -65,6 +66,35 @@ public:
         }
     }
 
+    [[using gnu: hot, flatten]] bool push(value_type value, index_type& index) noexcept {
+        while (true) {
+            index_type tail = tail_.load();
+            index_type seq = buffer_[tail].get_seq();
+
+            if (seq == static_cast<index_type>(tail << 1)) { // happy path: cell is empty
+                cell_type expected{static_cast<index_type>(tail << 1)};
+                cell_type desired{value, static_cast<index_type>((tail << 1) | 1U)};
+                if (buffer_[tail].compare_exchange(expected, desired)) {
+                    index = tail;
+                    if constexpr (!lazy_push) {
+                        tail_.compare_exchange_strong(tail, tail + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    }
+                    return true;
+                }
+            } else if (seq == static_cast<index_type>((tail << 1) | 1U) ||
+                       seq == static_cast<index_type>((tail + buffer_.size()) << 1)) { // cell is full OR someone has already popped this cell (cell is ready for next lap)
+                    tail_.compare_exchange_strong(tail, tail + 1); // Consider using compare_exchange_weak since we're already in retry loop
+            } else if (static_cast<index_type>(seq + (buffer_.size() << 1)) == static_cast<index_type>((tail << 1) | 1U)) {
+                return false; // queue is full
+            }
+        }
+    }
+
+    [[using gnu: hot, flatten]] bool enqueue(value_type value) noexcept {
+        return push(std::move(value));
+    }
+
+
     [[using gnu: hot, flatten]] bool pop(value_type& value) noexcept {
         while (true) {
             index_type head = head_.load();
@@ -87,12 +117,55 @@ public:
         }
     }
 
+    [[using gnu: hot, flatten]] bool pop(value_type& value, index_type& index) noexcept {
+        while (true) {
+            index_type head = head_.load();
+            cell_type snapshot{buffer_[head].load()};
+
+            if (snapshot.get_seq() == static_cast<index_type>((head << 1) | 1U)) {
+                cell_type empty_cell{static_cast<index_type>((head + buffer_.size()) << 1)};
+                if (buffer_[head].compare_exchange(snapshot, empty_cell)) {
+                    value = snapshot.get_data();
+                    index = head;
+                    if constexpr (!lazy_pop) {
+                        head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
+                    }
+                    return true;
+                }
+            } else if (static_cast<index_type>(snapshot.get_seq() | 1U) == static_cast<index_type>(((head + buffer_.size()) << 1) | 1U)) {
+                head_.compare_exchange_strong(head, head + 1);
+            } else if (snapshot.get_seq() == static_cast<index_type>(head << 1)) {
+                return false; // queue is empty
+            }
+        }
+    }
+
+    [[using gnu: hot, flatten]] bool dequeue(value_type& value) noexcept {
+        return pop(value);
+    }
+
     [[using gnu: hot, flatten]] bool peek(value_type& value) noexcept {
         while (true) {
             index_type head = head_.load();
             cell_type snapshot{buffer_[head].load()};
             if (snapshot.get_seq() == static_cast<index_type>((head << 1) | 1U)) {
                 value = snapshot.get_data();
+                return true;
+            } else if (snapshot.get_seq() == static_cast<index_type>((head + buffer_.size()) << 1)) {
+                head_.compare_exchange_strong(head, head + 1);
+            } else if (snapshot.get_seq() == static_cast<index_type>(head << 1)) {
+                return false; // queue is empty
+            }
+        }
+    }
+
+    [[using gnu: hot, flatten]] bool peek(value_type& value, index_type& index) noexcept {
+        while (true) {
+            index_type head = head_.load();
+            cell_type snapshot{buffer_[head].load()};
+            if (snapshot.get_seq() == static_cast<index_type>((head << 1) | 1U)) {
+                value = snapshot.get_data();
+                index = head;
                 return true;
             } else if (snapshot.get_seq() == static_cast<index_type>((head + buffer_.size()) << 1)) {
                 head_.compare_exchange_strong(head, head + 1);
