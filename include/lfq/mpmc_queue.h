@@ -21,19 +21,19 @@ inline constexpr size_t CACHELINE_SIZE = 64;
 // instead of a modulo). This is a skeleton: try_push/try_pop are declared
 // but not yet implemented. See the TODO in the private section for the
 // intended (Vyukov-style) algorithm shape.
-template <typename ValueT, size_t capacity, typename IndexT = uint32_t, bool lazy_push = false, bool lazy_pop = false>
+template <typename ValueT, size_t Capacity, typename IndexT = uint32_t, bool LazyPush = false, bool LazyPop = false>
 class mpmc_queue {
     using value_type = ValueT;
     using index_type = IndexT;
     using cell_type = cell<value_type, index_type>;
-    using array_type = inplace_array<cell_type, capacity>;
+    using array_type = inplace_array<cell_type, Capacity>;
 
-    static_assert(capacity >= 2, "Capacity must be at least 2");
-    static_assert((capacity & (capacity - 1)) == 0, "Capacity must be a power of two");
+    static_assert(Capacity >= 2, "Capacity must be at least 2");
+    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
 
 public:
     mpmc_queue() {
-        for (size_t i = 0; i < capacity; ++i) {
+        for (size_t i = 0; i < Capacity; ++i) {
             buffer_[i].set_seq(static_cast<index_type>(i << 1));
         }
     }
@@ -52,7 +52,7 @@ public:
                 cell_type expected{static_cast<index_type>(tail << 1)};
                 cell_type desired{value, static_cast<index_type>((tail << 1) | 1U)};
                 if (buffer_[tail].compare_exchange(expected, desired)) {
-                    if constexpr (!lazy_push) {
+                    if constexpr (!LazyPush) {
                         tail_.compare_exchange_strong(tail, tail + 1); // Consider using compare_exchange_weak since we're already in retry loop
                     }
                     return true;
@@ -76,7 +76,7 @@ public:
                 cell_type desired{value, static_cast<index_type>((tail << 1) | 1U)};
                 if (buffer_[tail].compare_exchange(expected, desired)) {
                     index = tail;
-                    if constexpr (!lazy_push) {
+                    if constexpr (!LazyPush) {
                         tail_.compare_exchange_strong(tail, tail + 1); // Consider using compare_exchange_weak since we're already in retry loop
                     }
                     return true;
@@ -104,7 +104,7 @@ public:
                 cell_type empty_cell{static_cast<index_type>((head + buffer_.size()) << 1)};
                 if (buffer_[head].compare_exchange(snapshot, empty_cell)) {
                     value = snapshot.get_data();
-                    if constexpr (!lazy_pop) {
+                    if constexpr (!LazyPop) {
                         head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
                     }
                     return true;
@@ -127,7 +127,7 @@ public:
                 if (buffer_[head].compare_exchange(snapshot, empty_cell)) {
                     value = snapshot.get_data();
                     index = head;
-                    if constexpr (!lazy_pop) {
+                    if constexpr (!LazyPop) {
                         head_.compare_exchange_strong(head, head + 1); // Consider using compare_exchange_weak since we're already in retry loop
                     }
                     return true;
@@ -187,6 +187,15 @@ public:
                 return false;
             }
         }
+    }
+
+    // Best effort size estimate. The value returned may be stale by the time it is used.
+    [[using gnu: hot, flatten]] [[nodiscard]] size_t size() const noexcept {
+        return tail_.load() - head_.load();
+    }
+
+    [[nodiscard]] static constexpr size_t capacity() noexcept {
+        return Capacity;
     }
 
 private:

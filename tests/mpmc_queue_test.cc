@@ -679,6 +679,24 @@ TEST(MpmcQueueEmptyTest, ReportsEmptyOnceAllConcurrentWorkIsDrained) {
     EXPECT_TRUE(q.empty());
 }
 
+TEST(MpmcQueueSizeTest, ReflectsNumberOfElements) {
+    lfq::mpmc_queue<int, 8> q;
+    EXPECT_EQ(q.size(), 0U);
+
+    ASSERT_TRUE(q.push(1));
+    ASSERT_TRUE(q.push(2));
+    EXPECT_EQ(q.size(), 2U);
+
+    int value = -1;
+    ASSERT_TRUE(q.pop(value));
+    EXPECT_EQ(q.size(), 1U);
+}
+
+TEST(MpmcQueueCapacityTest, ReturnsTemplateCapacity) {
+    lfq::mpmc_queue<int, 8> q;
+    EXPECT_EQ(q.capacity(), 8U);
+}
+
 // lazy_push/lazy_pop defer the tail_/head_ advancement CAS: a successful
 // push()/pop() that claims/releases a cell doesn't also bump the shared
 // index right away, leaving it to be noticed and bumped by a later call
